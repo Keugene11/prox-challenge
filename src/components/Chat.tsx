@@ -55,8 +55,9 @@ export function Chat() {
         content: m.parts.map((p) => (p.kind === "text" ? p.text : "")).join(""),
       }));
 
-    // Drop the trailing empty assistant turn we just added — server expects history to end on user.
-    const sendable = apiHistory.filter((_, i) => i < apiHistory.length - 1);
+    // The filter above already excluded the empty trailing assistant turn,
+    // so apiHistory ends on the user message — that's what the server wants.
+    const sendable = apiHistory;
 
     let buffered = "";
     let lastCommitted = "";
