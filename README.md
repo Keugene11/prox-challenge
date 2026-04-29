@@ -88,7 +88,9 @@ The figure index is the headline contribution. It turns "the wiring schematic" /
 
 ### The agent
 
-Built on `@anthropic-ai/claude-agent-sdk`. Five custom tools registered as an SDK MCP server (`mcp__manual__*`):
+The runtime is built directly on the **Anthropic Messages API** (`@anthropic-ai/sdk`). I started on `@anthropic-ai/claude-agent-sdk` and the architecture is identical, but the Agent SDK ships with an ~80MB native CLI binary that pushed the Vercel serverless function past its 250MB unzipped cap. Switching to the underlying Messages API kept every behavior identical (same tools, same prompt, same streaming, same multimodal output) and made the deploy work. As a side effect, per-turn latency dropped from ~24s to ~12s on the duty-cycle test because there's no MCP / tool-discovery round trip.
+
+Five tools, dispatched in a hand-rolled loop in `src/lib/agent.ts`:
 
 | Tool | Purpose |
 |---|---|
@@ -98,7 +100,7 @@ Built on `@anthropic-ai/claude-agent-sdk`. Five custom tools registered as an SD
 | `list_figures(kind?, query?)` | Discovery — "list every schematic" / "list every decision matrix". |
 | `render_artifact(title, description?, html)` | Emits a self-contained HTML/JS artifact that the UI renders inline in a sandboxed iframe. |
 
-The SDK's tool-use loop is wrapped in a streaming generator that projects raw `SDKMessage`s into a flat client-facing event stream:
+The Messages API stream is consumed event-by-event and projected into a flat client-facing event stream:
 
 - `delta` — assistant text token
 - `tool_use` / `tool_result` — for in-UI tool indicators
@@ -127,7 +129,7 @@ Tone: garage-coach. Direct, calm, no fluff, no AI-as-an-AI hedging. The user is 
 
 ### Why this stack
 
-- **Claude Agent SDK** — explicit requirement of the brief, and the `tool()` + `createSdkMcpServer()` pattern handles fan-out cleanly.
+- **Anthropic Messages API + hand-rolled tool loop** — explicit, debuggable, ships in a serverless-sized bundle. Prompt caching is set on the system prompt and tool list (`cache_control: { type: "ephemeral" }`), so subsequent turns within 5 min hit cache.
 - **Next.js App Router** — the SSE primitives and file-based route handlers fit the agent shape exactly. One repo, one runtime, Vercel-deployable.
 - **`@napi-rs/canvas`** — pure prebuilt binary, no Cairo/Pango install on Windows. The "canvas" npm package is a nightmare on Windows; this isn't.
 - **Pre-built committed index** — preserves the 2-minute clone-to-run target. The vision pass is expensive enough that it shouldn't fire on every clone.

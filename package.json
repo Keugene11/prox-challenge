@@ -14,7 +14,6 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.91.1",
-    "@anthropic-ai/claude-agent-sdk": "^0.2.122",
     "next": "^15.1.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
@@ -24,12 +23,7 @@
     "zod": "^4.0.0"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["sharp", "esbuild"],
-    "supportedArchitectures": {
-      "os": ["current", "linux"],
-      "cpu": ["current", "x64", "arm64"],
-      "libc": ["current", "glibc"]
-    }
+    "onlyBuiltDependencies": ["sharp", "esbuild"]
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

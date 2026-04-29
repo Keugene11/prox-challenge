@@ -1,13 +1,15 @@
+/**
+ * Agent runtime — Messages API + hand-rolled tool loop.
+ *
+ * Originally built on @anthropic-ai/claude-agent-sdk, but that SDK ships an
+ * 80MB native CLI binary that pushes the Vercel serverless bundle past its
+ * 250MB unzipped cap. We use the underlying Messages API directly: same
+ * model, same tools, same streaming behavior, no native binary. Prompt
+ * caching is applied to the system prompt + tool list.
+ */
 import fs from "node:fs/promises";
 import path from "node:path";
-import { z } from "zod";
-import {
-  query as agentQuery,
-  tool,
-  createSdkMcpServer,
-  type SDKMessage,
-  type SDKUserMessage,
-} from "@anthropic-ai/claude-agent-sdk";
+import Anthropic from "@anthropic-ai/sdk";
 import {
   loadKnowledge,
   searchPages,
@@ -17,170 +19,197 @@ import {
 } from "@/lib/knowledge";
 
 const MODEL = process.env.PROX_MODEL || "claude-sonnet-4-6";
+const MAX_TURNS = 12;
+const MAX_TOKENS = 8192;
 
 export type ChatTurn = {
   role: "user" | "assistant";
   content: string;
 };
 
-/**
- * The Agent SDK wants a server-name + tool-name namespace. We use
- * "manual" so tool names surface as `mcp__manual__search_manual` etc.
- */
-const SERVER_NAME = "manual";
-
-async function readPageImage(pageImagePath: string): Promise<{ data: string; mimeType: string }> {
+async function readPageImage(pageImagePath: string): Promise<{ data: string; mimeType: "image/png" | "image/jpeg" }> {
   const buf = await fs.readFile(path.join(process.cwd(), pageImagePath));
-  const mimeType = pageImagePath.toLowerCase().endsWith(".png") ? "image/png" : "image/jpeg";
+  const mimeType: "image/png" | "image/jpeg" = pageImagePath.toLowerCase().endsWith(".png") ? "image/png" : "image/jpeg";
   return { data: buf.toString("base64"), mimeType };
 }
 
-async function buildMcpServer() {
+const TOOLS: Anthropic.Tool[] = [
+  {
+    name: "search_manual",
+    description:
+      "Search the Vulcan OmniPro 220 manual set (owner manual, quick start, selection chart) for relevant pages. Returns ranked hits with section, page caption, a text snippet, and any figures (diagrams/schematics/photos/tables) on each page. ALWAYS call this before answering a technical question — it is the only way to ground answers in the actual manual.",
+    input_schema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Natural-language search query, e.g. 'duty cycle MIG 240V' or 'TIG polarity setup'." },
+        doc: { type: "string", enum: ["owner-manual", "quick-start", "selection-chart"], description: "Restrict search to one document. Omit for all docs." },
+        limit: { type: "integer", minimum: 1, maximum: 12, description: "Max hits (default 6)." },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "get_page_image",
+    description:
+      "Return a specific page of one of the manuals as an image, so the user can see the diagram/table/schematic directly. Use this whenever the answer involves visual content — never describe a wiring schematic, weld-diagnosis photo, or duty-cycle table without also showing it.",
+    input_schema: {
+      type: "object",
+      properties: {
+        doc: { type: "string", enum: ["owner-manual", "quick-start", "selection-chart"] },
+        page: { type: "integer", minimum: 1, description: "1-indexed page number." },
+      },
+      required: ["doc", "page"],
+    },
+  },
+  {
+    name: "get_figure",
+    description:
+      "Return a specific labeled figure (diagram, schematic, photo, table, decision-matrix, etc.) by its id. The figure id comes from search_manual results.",
+    input_schema: {
+      type: "object",
+      properties: { id: { type: "string", description: "Figure id from search results." } },
+      required: ["id"],
+    },
+  },
+  {
+    name: "list_figures",
+    description:
+      "List labeled visual elements across the manual set, optionally filtered by kind or query. Useful when the user asks for 'the wiring schematic' or 'weld-diagnosis examples' and you want to find them quickly.",
+    input_schema: {
+      type: "object",
+      properties: {
+        kind: { type: "string", enum: ["diagram", "schematic", "photo", "table", "chart", "decision-matrix", "control-panel"] },
+        query: { type: "string" },
+        limit: { type: "integer", minimum: 1, maximum: 40 },
+      },
+    },
+  },
+  {
+    name: "render_artifact",
+    description:
+      "Generate an interactive HTML/JS artifact (a self-contained mini-app) and surface it inline in the chat. Use this for things that are easier to USE than to read: a duty-cycle calculator, a polarity-setup picker, a settings configurator that takes process+material+thickness and outputs wire-speed/voltage, a step-by-step troubleshooting flowchart. The HTML should be a complete document (full <!doctype html>...</html>), styled minimally (system font, white background, black text), and ALL JS must be inline — no external scripts or fetch calls. Output is rendered in a sandboxed iframe.",
+    input_schema: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "Short title shown above the artifact." },
+        description: { type: "string", description: "One-sentence subtitle/description." },
+        html: { type: "string", description: "Complete self-contained HTML document with inline CSS and JS." },
+      },
+      required: ["title", "html"],
+    },
+  },
+];
+
+/**
+ * Tool dispatcher. Each handler returns:
+ *   - content: array of MessageContent blocks (image | text) sent back to Claude
+ *   - meta: optional structured info we want to surface to the UI
+ *           (provenance for images, artifact payload for render_artifact)
+ *   - isError: tool-level error flag (Claude will see and recover)
+ */
+type ToolResult = {
+  content: Array<
+    | { type: "text"; text: string }
+    | { type: "image"; source: { type: "base64"; media_type: "image/png" | "image/jpeg"; data: string } }
+  >;
+  meta?:
+    | { kind: "page_image"; doc: string; page: number }
+    | { kind: "figure"; doc: string; page: number }
+    | { kind: "artifact"; title: string; description: string | null; html: string };
+  isError?: boolean;
+};
+
+async function runTool(name: string, input: Record<string, unknown>): Promise<ToolResult> {
   const idx = await loadKnowledge();
 
-  const searchManual = tool(
-    "search_manual",
-    "Search the Vulcan OmniPro 220 manual set (owner manual, quick start, selection chart) for relevant pages. Returns ranked hits with section, page caption, a text snippet, and any figures (diagrams/schematics/photos/tables) on each page. ALWAYS call this before answering a technical question — it is the only way to ground answers in the actual manual.",
-    {
-      query: z.string().describe("Natural-language search query, e.g. 'duty cycle MIG 240V' or 'TIG polarity setup'."),
-      doc: z
-        .enum(["owner-manual", "quick-start", "selection-chart"])
-        .optional()
-        .describe("Restrict search to one document. Omit for all docs."),
-      limit: z.number().int().min(1).max(12).optional().describe("Max hits (default 6)."),
-    },
-    async (args) => {
-      const hits = searchPages(idx, args.query, { limit: args.limit ?? 6, doc: args.doc });
-      if (hits.length === 0) {
-        return {
-          content: [{ type: "text", text: `No matches for "${args.query}". Try different wording, or call list_figures.` }],
-        };
-      }
-      const lines = hits.map(
-        (h) =>
-          `• [${h.doc} p${h.page}] ${h.section ? `${h.section} — ` : ""}${h.caption}\n  topics: ${h.topics.join(", ") || "—"}\n  ${
-            h.figures.length ? `figures: ${h.figures.map((f) => `${f.id}(${f.kind}: ${f.label})`).join("; ")}\n  ` : ""
-          }snippet: ${h.snippet}`,
-      );
+  if (name === "search_manual") {
+    const query = String(input.query ?? "");
+    const doc = input.doc as "owner-manual" | "quick-start" | "selection-chart" | undefined;
+    const limit = typeof input.limit === "number" ? input.limit : 6;
+    const hits = searchPages(idx, query, { limit, doc });
+    if (hits.length === 0) {
+      return { content: [{ type: "text", text: `No matches for "${query}". Try different wording, or call list_figures.` }] };
+    }
+    const lines = hits.map(
+      (h) =>
+        `• [${h.doc} p${h.page}] ${h.section ? `${h.section} — ` : ""}${h.caption}\n  topics: ${h.topics.join(", ") || "—"}\n  ${
+          h.figures.length ? `figures: ${h.figures.map((f) => `${f.id}(${f.kind}: ${f.label})`).join("; ")}\n  ` : ""
+        }snippet: ${h.snippet}`,
+    );
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Found ${hits.length} pages:\n\n${lines.join("\n\n")}\n\nUse get_page_image(doc, page) to actually show a page, or get_figure(id) for a labeled figure.`,
+        },
+      ],
+    };
+  }
+
+  if (name === "get_page_image") {
+    const doc = String(input.doc);
+    const page = Number(input.page);
+    const p = getPage(idx, doc, page);
+    if (!p) {
+      return { content: [{ type: "text", text: `No page ${page} in ${doc}.` }], isError: true };
+    }
+    const { data, mimeType } = await readPageImage(p.image);
+    return {
+      content: [
+        { type: "image", source: { type: "base64", media_type: mimeType, data } },
+        { type: "text", text: `Shown: ${doc} p${page} — ${p.section ? `${p.section}. ` : ""}${p.caption}` },
+      ],
+      meta: { kind: "page_image", doc, page },
+    };
+  }
+
+  if (name === "get_figure") {
+    const id = String(input.id);
+    const found = getFigure(idx, id);
+    if (!found) {
       return {
-        content: [
-          {
-            type: "text",
-            text: `Found ${hits.length} pages:\n\n${lines.join("\n\n")}\n\nUse get_page_image(doc, page) to actually show a page, or get_figure(id) for a labeled figure.`,
-          },
-        ],
+        content: [{ type: "text", text: `No figure with id ${id}. Use search_manual or list_figures to discover ids.` }],
+        isError: true,
       };
-    },
-  );
+    }
+    const { data, mimeType } = await readPageImage(found.page.image);
+    return {
+      content: [
+        { type: "image", source: { type: "base64", media_type: mimeType, data } },
+        {
+          type: "text",
+          text: `${found.figure.label} (${found.figure.kind}) — ${found.figure.summary}\nFrom ${found.page.doc} p${found.page.page}.`,
+        },
+      ],
+      meta: { kind: "figure", doc: found.page.doc, page: found.page.page },
+    };
+  }
 
-  const getPageImage = tool(
-    "get_page_image",
-    "Return a specific page of one of the manuals as an image, so the user can see the diagram/table/schematic directly. Use this whenever the answer involves visual content — never describe a wiring schematic, weld-diagnosis photo, or duty-cycle table without also showing it.",
-    {
-      doc: z
-        .enum(["owner-manual", "quick-start", "selection-chart"])
-        .describe("Which document the page is in."),
-      page: z.number().int().min(1).describe("1-indexed page number within that document."),
-    },
-    async (args) => {
-      const page = getPage(idx, args.doc, args.page);
-      if (!page) {
-        return { content: [{ type: "text", text: `No page ${args.page} in ${args.doc}.` }] };
-      }
-      const { data, mimeType } = await readPageImage(page.image);
-      return {
-        content: [
-          { type: "image", data, mimeType },
-          {
-            type: "text",
-            text: `Shown: ${args.doc} p${args.page} — ${page.section ? `${page.section}. ` : ""}${page.caption}`,
-          },
-        ],
-      };
-    },
-  );
+  if (name === "list_figures") {
+    const kind = input.kind as ToolResult["meta"] extends { kind: infer _K } ? string : never;
+    const query = input.query ? String(input.query) : undefined;
+    const limit = typeof input.limit === "number" ? input.limit : 16;
+    const figs = listFigures(idx, {
+      kind: kind as Parameters<typeof listFigures>[1] extends { kind?: infer K } ? K : undefined,
+      query,
+      limit,
+    });
+    if (figs.length === 0) return { content: [{ type: "text", text: "No figures match." }] };
+    const lines = figs.map((f) => `• ${f.id} — ${f.label} (${f.kind}) — ${f.doc} p${f.page} — ${f.summary}`);
+    return { content: [{ type: "text", text: lines.join("\n") }] };
+  }
 
-  const getFigureTool = tool(
-    "get_figure",
-    "Return a specific labeled figure (diagram, schematic, photo, table, decision-matrix, etc.) by its id. The figure id comes from search_manual results.",
-    {
-      id: z.string().describe("Figure id from search results."),
-    },
-    async (args) => {
-      const found = getFigure(idx, args.id);
-      if (!found) {
-        return { content: [{ type: "text", text: `No figure with id ${args.id}. Use search_manual or list_figures to discover ids.` }] };
-      }
-      const { data, mimeType } = await readPageImage(found.page.image);
-      return {
-        content: [
-          { type: "image", data, mimeType },
-          {
-            type: "text",
-            text: `${found.figure.label} (${found.figure.kind}) — ${found.figure.summary}\nFrom ${found.page.doc} p${found.page.page}.`,
-          },
-        ],
-      };
-    },
-  );
+  if (name === "render_artifact") {
+    const title = String(input.title ?? "Artifact");
+    const description = input.description ? String(input.description) : null;
+    const html = String(input.html ?? "");
+    return {
+      content: [{ type: "text", text: `Rendered an interactive artifact: ${title}.` }],
+      meta: { kind: "artifact", title, description, html },
+    };
+  }
 
-  const listFiguresTool = tool(
-    "list_figures",
-    "List labeled visual elements across the manual set, optionally filtered by kind or query. Useful when the user asks for 'the wiring schematic' or 'weld-diagnosis examples' and you want to find them quickly.",
-    {
-      kind: z
-        .enum(["diagram", "schematic", "photo", "table", "chart", "decision-matrix", "control-panel"])
-        .optional(),
-      query: z.string().optional(),
-      limit: z.number().int().min(1).max(40).optional(),
-    },
-    async (args) => {
-      const figs = listFigures(idx, { kind: args.kind, query: args.query, limit: args.limit ?? 16 });
-      if (figs.length === 0) {
-        return { content: [{ type: "text", text: "No figures match." }] };
-      }
-      const lines = figs.map(
-        (f) => `• ${f.id} — ${f.label} (${f.kind}) — ${f.doc} p${f.page} — ${f.summary}`,
-      );
-      return { content: [{ type: "text", text: lines.join("\n") }] };
-    },
-  );
-
-  const renderArtifact = tool(
-    "render_artifact",
-    "Generate an interactive HTML/JS artifact (a self-contained mini-app) and surface it inline in the chat. Use this for things that are easier to USE than to read: a duty-cycle calculator, a polarity-setup picker, a settings configurator that takes process+material+thickness and outputs wire-speed/voltage, a step-by-step troubleshooting flowchart. The HTML should be a complete document (full <!doctype html>...</html>), styled minimally (system font, white background, black text), and ALL JS must be inline — no external scripts or fetch calls. Output is rendered in a sandboxed iframe.",
-    {
-      title: z.string().describe("Short title shown above the artifact."),
-      description: z.string().optional().describe("One-sentence subtitle/description."),
-      html: z.string().describe("Complete self-contained HTML document with inline CSS and JS."),
-    },
-    async (args) => {
-      // The artifact itself is conveyed back to the UI as a structured marker
-      // in the text content. The route handler intercepts marker blocks and
-      // exposes them to the client as a separate part. We use a fenced JSON
-      // block with a magic key that the server side picks up.
-      const payload = JSON.stringify({
-        __artifact__: true,
-        title: args.title,
-        description: args.description ?? null,
-        html: args.html,
-      });
-      return {
-        content: [
-          {
-            type: "text",
-            text: `<<<ARTIFACT>>>${payload}<<<END_ARTIFACT>>>\n\nRendered an interactive artifact: ${args.title}.`,
-          },
-        ],
-      };
-    },
-  );
-
-  return createSdkMcpServer({
-    name: SERVER_NAME,
-    version: "0.1.0",
-    tools: [searchManual, getPageImage, getFigureTool, listFiguresTool, renderArtifact],
-  });
+  return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
 }
 
 export const SYSTEM_PROMPT = `You are **Spark**, the in-garage expert for the Vulcan OmniPro 220 multiprocess welder. You help hobbyist welders set the machine up, dial it in, and troubleshoot bad welds. Your user is intelligent but not a professional welder — assume a home garage, a part-time hobby, and zero patience for vague answers.
@@ -222,200 +251,150 @@ export type StreamEvent =
   | { type: "error"; message: string };
 
 /**
- * Convert a Claude Agent SDK message stream into our flat client-facing event
- * stream. We extract:
- *   - assistant text deltas
- *   - tool calls (just for transparency in the UI)
- *   - tool results that contain images → emit `image` events with provenance
- *   - tool results that contain `<<<ARTIFACT>>>...<<<END_ARTIFACT>>>` markers
- *     → emit `artifact` events
- *   - tool results from get_page_image / get_figure → emit `page_ref` events
- *     so the UI can show a thumbnail strip of cited pages
+ * Multi-turn agent loop:
+ *   1. Send the conversation + tools to Claude (streamed).
+ *   2. Stream text deltas to the client as they arrive.
+ *   3. When Claude wants to use a tool, finalize the assistant turn,
+ *      execute the tool, append the result, and loop.
+ *   4. Stop when Claude returns end_turn or we hit MAX_TURNS.
+ *
+ * Prompt caching: system prompt and tool list are marked
+ * `cache_control: { type: "ephemeral" }` so subsequent turns within 5 min
+ * read them from cache (~10x cheaper).
  */
 export async function* runAgent(
   history: ChatTurn[],
   apiKey: string,
 ): AsyncGenerator<StreamEvent> {
-  let server;
-  try {
-    server = await buildMcpServer();
-  } catch (err) {
-    yield {
-      type: "error",
-      message:
-        "Knowledge index not built. Run `pnpm prepare:knowledge` after adding your API key to .env. Original error: " +
-        (err as Error).message,
-    };
-    return;
-  }
   const idx = await loadKnowledge();
+  const client = new Anthropic({ apiKey });
 
-  // The Agent SDK's `query()` accepts either a single string prompt, or an
-  // async iterable of streaming-input messages (full conversation). For
-  // multi-turn chat we use the latter.
-  async function* inputStream(): AsyncIterable<SDKUserMessage> {
-    for (const turn of history) {
-      if (turn.role !== "user") continue;
-      yield {
-        type: "user",
-        message: { role: "user", content: turn.content },
-        parent_tool_use_id: null,
-        session_id: "spark",
-      } satisfies SDKUserMessage;
-    }
-  }
+  const messages: Anthropic.MessageParam[] = history.map((t) => ({
+    role: t.role,
+    content: t.content,
+  }));
 
-  // Track tool inputs by id so we can correlate results back to their call
-  // site (e.g. to emit `page_ref` events with the right doc/page).
-  const toolCallSites = new Map<string, { name: string; input: Record<string, unknown> }>();
+  // Cache the tool list (largest static payload) for repeat turns.
+  const cachedTools = TOOLS.map((t, i) =>
+    i === TOOLS.length - 1
+      ? ({ ...t, cache_control: { type: "ephemeral" } } as Anthropic.Tool)
+      : t,
+  );
 
-  // History reconstruction: the SDK can be given full prior assistant turns by
-  // pre-seeding `messages`, but the simplest reliable path is to send the
-  // whole conversation as user messages with role markers, OR rely on the
-  // session id. For multi-turn we inline prior turns directly into the next
-  // user message as plain context. Keep it simple here:
-  const lastUser = history.filter((t) => t.role === "user").at(-1)?.content ?? "";
-  const priorContext = history
-    .slice(0, -1)
-    .map((t) => `${t.role === "user" ? "User" : "Assistant"}: ${t.content}`)
-    .join("\n\n");
+  const systemBlocks: Anthropic.TextBlockParam[] = [
+    { type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } },
+  ];
 
-  const prompt = priorContext
-    ? `${priorContext}\n\nUser: ${lastUser}`
-    : lastUser;
-
-  try {
-    process.env.ANTHROPIC_API_KEY = apiKey;
-
-    const stream = agentQuery({
-      prompt,
-      options: {
+  for (let turn = 0; turn < MAX_TURNS; turn++) {
+    let stream;
+    try {
+      stream = client.messages.stream({
         model: MODEL,
-        systemPrompt: SYSTEM_PROMPT,
-        mcpServers: { [SERVER_NAME]: server },
-        allowedTools: [
-          `mcp__${SERVER_NAME}__search_manual`,
-          `mcp__${SERVER_NAME}__get_page_image`,
-          `mcp__${SERVER_NAME}__get_figure`,
-          `mcp__${SERVER_NAME}__list_figures`,
-          `mcp__${SERVER_NAME}__render_artifact`,
-        ],
-        permissionMode: "bypassPermissions",
-        maxTurns: 12,
-      },
-    });
-
-    for await (const msg of stream as AsyncIterable<SDKMessage>) {
-      // The SDK emits assistant events that wrap raw API content blocks.
-      // We pattern-match on the discriminator and project to flat events.
-      const m = msg as unknown as { type: string; message?: { content?: unknown[]; usage?: unknown } };
-
-      if (m.type === "assistant" && m.message?.content) {
-        for (const block of m.message.content as Array<Record<string, unknown>>) {
-          if (block.type === "text" && typeof block.text === "string") {
-            // Detect inline artifact markers.
-            const text = block.text as string;
-            const artifactRe = /<<<ARTIFACT>>>([\s\S]*?)<<<END_ARTIFACT>>>/g;
-            let lastIndex = 0;
-            let match: RegExpExecArray | null;
-            while ((match = artifactRe.exec(text))) {
-              if (match.index > lastIndex) {
-                yield { type: "delta", text: text.slice(lastIndex, match.index) };
-              }
-              try {
-                const parsed = JSON.parse(match[1]);
-                yield {
-                  type: "artifact",
-                  title: String(parsed.title || "Artifact"),
-                  description: parsed.description ?? null,
-                  html: String(parsed.html || ""),
-                };
-              } catch {
-                // ignore malformed
-              }
-              lastIndex = match.index + match[0].length;
-            }
-            if (lastIndex < text.length) {
-              yield { type: "delta", text: text.slice(lastIndex) };
-            }
-          } else if (block.type === "tool_use") {
-            const id = String(block.id);
-            const name = String(block.name);
-            const input = (block.input as Record<string, unknown>) || {};
-            toolCallSites.set(id, { name, input });
-            yield { type: "tool_use", id, name, input };
-          }
-        }
-      } else if (m.type === "user" && m.message?.content) {
-        // Tool results show up as "user" messages from the SDK perspective.
-        for (const block of m.message.content as Array<Record<string, unknown>>) {
-          if (block.type === "tool_result") {
-            const toolUseId = String(block.tool_use_id);
-            const callSite = toolCallSites.get(toolUseId);
-            const isError = block.is_error === true;
-            yield { type: "tool_result", toolUseId, ok: !isError };
-
-            const inner = block.content;
-            if (Array.isArray(inner)) {
-              for (const ib of inner as Array<Record<string, unknown>>) {
-                if (ib.type === "image") {
-                  // The Agent SDK may surface image either as `source` (Anthropic format) or flat data fields (MCP format)
-                  let data: string | null = null;
-                  let mediaType = "image/png";
-                  if (typeof ib.data === "string") {
-                    data = ib.data as string;
-                    if (typeof ib.mimeType === "string") mediaType = ib.mimeType;
-                  } else if (ib.source && typeof ib.source === "object") {
-                    const src = ib.source as Record<string, unknown>;
-                    if (typeof src.data === "string") data = src.data;
-                    if (typeof src.media_type === "string") mediaType = src.media_type;
-                  }
-                  if (data) {
-                    let provenance: { doc: string; page: number } | null = null;
-                    if (callSite?.name?.endsWith("get_page_image")) {
-                      provenance = {
-                        doc: String(callSite.input.doc),
-                        page: Number(callSite.input.page),
-                      };
-                    } else if (callSite?.name?.endsWith("get_figure")) {
-                      const figId = String(callSite.input.id);
-                      const found = getFigure(idx, figId);
-                      if (found) provenance = { doc: found.page.doc, page: found.page.page };
-                    }
-                    yield { type: "image", data, mimeType: mediaType, source: provenance };
-                    if (provenance) {
-                      const pg = getPage(idx, provenance.doc, provenance.page);
-                      if (pg) yield { type: "page_ref", doc: pg.doc, page: pg.page, thumb: pg.thumb };
-                    }
-                  }
-                } else if (ib.type === "text" && typeof ib.text === "string") {
-                  // Surface artifact markers from tool-result text too.
-                  const text = ib.text as string;
-                  const artifactRe = /<<<ARTIFACT>>>([\s\S]*?)<<<END_ARTIFACT>>>/g;
-                  let match: RegExpExecArray | null;
-                  while ((match = artifactRe.exec(text))) {
-                    try {
-                      const parsed = JSON.parse(match[1]);
-                      yield {
-                        type: "artifact",
-                        title: String(parsed.title || "Artifact"),
-                        description: parsed.description ?? null,
-                        html: String(parsed.html || ""),
-                      };
-                    } catch {
-                      // ignore
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      } else if (m.type === "result") {
-        yield { type: "done", usage: m.message?.usage };
-      }
+        max_tokens: MAX_TOKENS,
+        system: systemBlocks,
+        tools: cachedTools,
+        messages,
+      });
+    } catch (err) {
+      yield { type: "error", message: (err as Error).message || "stream init failed" };
+      return;
     }
-  } catch (err) {
-    yield { type: "error", message: (err as Error).message || "Agent error" };
+
+    // We accumulate per-block state ourselves — the streamed events tell us
+    // when text/tool blocks start, deltas arrive, and they finalize.
+    type ActiveBlock =
+      | { kind: "text"; text: string }
+      | { kind: "tool_use"; id: string; name: string; jsonBuf: string };
+    const activeBlocks: Record<number, ActiveBlock> = {};
+
+    try {
+      for await (const event of stream) {
+        if (event.type === "content_block_start") {
+          const block = event.content_block;
+          if (block.type === "text") {
+            activeBlocks[event.index] = { kind: "text", text: "" };
+          } else if (block.type === "tool_use") {
+            activeBlocks[event.index] = { kind: "tool_use", id: block.id, name: block.name, jsonBuf: "" };
+            yield { type: "tool_use", id: block.id, name: block.name, input: {} };
+          }
+        } else if (event.type === "content_block_delta") {
+          const slot = activeBlocks[event.index];
+          if (!slot) continue;
+          if (slot.kind === "text" && event.delta.type === "text_delta") {
+            const t = event.delta.text;
+            slot.text += t;
+            yield { type: "delta", text: t };
+          } else if (slot.kind === "tool_use" && event.delta.type === "input_json_delta") {
+            slot.jsonBuf += event.delta.partial_json;
+          }
+        } else if (event.type === "content_block_stop") {
+          // No-op — finalization happens after the stream ends via finalMessage.
+        }
+      }
+    } catch (err) {
+      yield { type: "error", message: (err as Error).message || "stream error" };
+      return;
+    }
+
+    const final = await stream.finalMessage();
+
+    // Push the assistant turn into the conversation so the next loop sees it.
+    messages.push({ role: "assistant", content: final.content });
+
+    // If no tools to run, we're done.
+    const toolUses = final.content.filter(
+      (b): b is Anthropic.ToolUseBlock => b.type === "tool_use",
+    );
+    if (toolUses.length === 0 || final.stop_reason === "end_turn") {
+      yield { type: "done", usage: final.usage };
+      return;
+    }
+
+    // Execute each requested tool, emit UI events as we go, and assemble
+    // the tool_result blocks that feed into the next turn.
+    const toolResultBlocks: Anthropic.ToolResultBlockParam[] = [];
+    for (const tu of toolUses) {
+      let result: ToolResult;
+      try {
+        result = await runTool(tu.name, (tu.input as Record<string, unknown>) || {});
+      } catch (err) {
+        result = { content: [{ type: "text", text: `Tool error: ${(err as Error).message}` }], isError: true };
+      }
+
+      yield { type: "tool_result", toolUseId: tu.id, ok: !result.isError };
+
+      // Surface UI-only side-channels (image, artifact, page_ref).
+      if (result.meta?.kind === "page_image" || result.meta?.kind === "figure") {
+        const imgBlock = result.content.find((c): c is Extract<ToolResult["content"][number], { type: "image" }> => c.type === "image");
+        if (imgBlock) {
+          yield {
+            type: "image",
+            data: imgBlock.source.data,
+            mimeType: imgBlock.source.media_type,
+            source: { doc: result.meta.doc, page: result.meta.page },
+          };
+        }
+        const pg = getPage(idx, result.meta.doc, result.meta.page);
+        if (pg) yield { type: "page_ref", doc: pg.doc, page: pg.page, thumb: pg.thumb };
+      } else if (result.meta?.kind === "artifact") {
+        yield {
+          type: "artifact",
+          title: result.meta.title,
+          description: result.meta.description,
+          html: result.meta.html,
+        };
+      }
+
+      toolResultBlocks.push({
+        type: "tool_result",
+        tool_use_id: tu.id,
+        content: result.content,
+        is_error: result.isError,
+      });
+    }
+
+    messages.push({ role: "user", content: toolResultBlocks });
   }
+
+  yield { type: "done" };
 }
