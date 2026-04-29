@@ -1,0 +1,129 @@
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+import { Maximize2, Minimize2, ExternalLink } from "lucide-react";
+
+export type ArtifactPayload = {
+  title: string;
+  description: string | null;
+  html: string;
+};
+
+/**
+ * Sandboxed inline renderer for agent-generated HTML/JS artifacts.
+ * The iframe runs with `sandbox="allow-scripts"` (no allow-same-origin),
+ * so the artifact cannot read cookies, hit our origin's storage, or fetch
+ * authenticated APIs. It can run JS and render UI.
+ */
+export function Artifact({ artifact }: { artifact: ArtifactPayload }) {
+  const iframeRef = useRef<HTMLIFrameElement>(null);
+  const [height, setHeight] = useState(420);
+  const [expanded, setExpanded] = useState(false);
+  const [errored, setErrored] = useState<string | null>(null);
+
+  useEffect(() => {
+    function onMessage(e: MessageEvent) {
+      if (!e.data || typeof e.data !== "object") return;
+      if (e.data.__artifact_resize__ && iframeRef.current?.contentWindow === e.source) {
+        const h = Math.max(160, Math.min(1400, Number(e.data.height) || 420));
+        setHeight(h);
+      }
+    }
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, []);
+
+  // Inject a tiny shim that posts content height back so we can autosize.
+  const wrapped = wrapArtifactHtml(artifact.html);
+
+  function openInTab() {
+    const blob = new Blob([wrapped], { type: "text/html" });
+    const url = URL.createObjectURL(blob);
+    window.open(url, "_blank", "noopener,noreferrer");
+    setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  }
+
+  return (
+    <div className="card overflow-hidden">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-ink-line">
+        <div className="min-w-0">
+          <div className="text-sm font-medium truncate">{artifact.title}</div>
+          {artifact.description ? (
+            <div className="text-xs text-ink-muted truncate">{artifact.description}</div>
+          ) : null}
+        </div>
+        <div className="flex items-center gap-1">
+          <button className="btn !px-2 !py-1.5 text-xs" onClick={() => setExpanded((v) => !v)} title="Toggle size">
+            {expanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+          </button>
+          <button className="btn !px-2 !py-1.5 text-xs" onClick={openInTab} title="Open in new tab">
+            <ExternalLink size={14} />
+          </button>
+        </div>
+      </div>
+      {errored ? (
+        <div className="p-4 text-sm text-red-600">Artifact failed to render: {errored}</div>
+      ) : (
+        <iframe
+          ref={iframeRef}
+          sandbox="allow-scripts"
+          srcDoc={wrapped}
+          onError={() => setErrored("iframe error")}
+          className="w-full block bg-white"
+          style={{ height: expanded ? Math.max(640, height) : height, transition: "height 200ms ease" }}
+        />
+      )}
+    </div>
+  );
+}
+
+function wrapArtifactHtml(html: string) {
+  // If the artifact is a full document, leave it alone but inject the shim
+  // before </body> (or append). Otherwise wrap it in a default skeleton.
+  const shim = `
+<script>
+  (function () {
+    function postHeight() {
+      try {
+        var h = Math.max(
+          document.body.scrollHeight,
+          document.documentElement.scrollHeight,
+          document.body.offsetHeight
+        );
+        parent.postMessage({ __artifact_resize__: true, height: h + 16 }, "*");
+      } catch (e) {}
+    }
+    window.addEventListener("load", postHeight);
+    window.addEventListener("resize", postHeight);
+    if (typeof ResizeObserver !== "undefined") {
+      new ResizeObserver(postHeight).observe(document.documentElement);
+    }
+    setTimeout(postHeight, 50);
+    setTimeout(postHeight, 400);
+  })();
+</script>`;
+
+  if (/<\/html>/i.test(html)) {
+    if (/<\/body>/i.test(html)) return html.replace(/<\/body>/i, shim + "</body>");
+    return html.replace(/<\/html>/i, shim + "</html>");
+  }
+  return `<!doctype html>
+<html><head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  :root { color-scheme: light; }
+  html, body { margin: 0; padding: 0; background: #fff; color: #0a0a0a;
+    font-family: "DM Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    font-size: 14px; line-height: 1.45; }
+  body { padding: 16px; }
+  button, input, select, textarea { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  * { box-sizing: border-box; }
+</style>
+</head>
+<body>
+${html}
+${shim}
+</body></html>`;
+}
