@@ -6,7 +6,7 @@
  * Usage: pnpm tsx scripts/smoke-test.ts "your question here"
  */
 const QUESTION = process.argv[2] || "Show me the wiring schematic.";
-const URL = process.env.SMOKE_URL || "http://localhost:3000/api/chat";
+const ENDPOINT = process.env.SMOKE_URL || "http://localhost:3000/api/chat";
 
 type EventCounters = {
   delta_chars: number;
@@ -34,7 +34,7 @@ async function main() {
   };
 
   const t0 = Date.now();
-  const res = await fetch(URL, {
+  const res = await fetch(ENDPOINT, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
