@@ -9,7 +9,14 @@ export type MessagePart =
   | { kind: "text"; text: string }
   | { kind: "image"; src: string; source?: { doc: string; page: number } | null }
   | { kind: "artifact"; artifact: ArtifactPayload }
-  | { kind: "tool"; name: string; status: "running" | "done" | "error" };
+  | {
+      kind: "tool";
+      name: string;
+      // Consecutive calls of the same tool collapse into one row with these counts.
+      running: number;
+      done: number;
+      errors: number;
+    };
 
 export type ChatMessage = {
   role: "user" | "assistant";
@@ -69,16 +76,22 @@ export function Message({
           return <Artifact key={i} artifact={part.artifact} />;
         }
         if (part.kind === "tool") {
+          const total = part.running + part.done + part.errors;
+          const isRunning = part.running > 0;
+          const hasError = part.errors > 0;
           return (
             <div key={i} className="flex items-center gap-2 text-[11px] text-ink-muted">
               <span
                 className={
                   "h-1.5 w-1.5 rounded-full " +
-                  (part.status === "running" ? "bg-ink dot-pulse" : part.status === "error" ? "bg-red-500" : "bg-ink-muted/50")
+                  (isRunning ? "bg-ink dot-pulse" : hasError ? "bg-red-500" : "bg-ink-muted/50")
                 }
               />
               <span className="font-mono">{prettyToolName(part.name)}</span>
-              <span>{part.status === "running" ? "running…" : part.status === "error" ? "failed" : "done"}</span>
+              {total > 1 ? <span className="font-mono opacity-60">×{total}</span> : null}
+              <span>
+                {isRunning ? `running…${part.done > 0 ? ` (${part.done} done)` : ""}` : hasError ? `failed${part.errors > 1 ? ` ×${part.errors}` : ""}` : "done"}
+              </span>
             </div>
           );
         }

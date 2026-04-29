@@ -131,21 +131,31 @@ export function Chat() {
         if (ev.type === "delta") {
           appendText(ev.text);
         } else if (ev.type === "tool_use") {
-          // Lock in any in-progress text and add a tool indicator.
+          // Lock in any in-progress text, then merge consecutive same-name
+          // tool calls into a single counted indicator.
           if (buffered) {
             startNewTextSlot();
           }
-          patchAssistant((m) => ({
-            ...m,
-            parts: [...m.parts, { kind: "tool", name: ev.name, status: "running" }],
-          }));
+          patchAssistant((m) => {
+            const parts = m.parts.slice();
+            const last = parts[parts.length - 1];
+            if (last && last.kind === "tool" && last.name === ev.name) {
+              parts[parts.length - 1] = { ...last, running: last.running + 1 };
+            } else {
+              parts.push({ kind: "tool", name: ev.name, running: 1, done: 0, errors: 0 });
+            }
+            return { ...m, parts };
+          });
         } else if (ev.type === "tool_result") {
           patchAssistant((m) => {
             const parts = m.parts.slice();
+            // Find the most recent tool indicator with running > 0 and decrement.
             for (let i = parts.length - 1; i >= 0; i--) {
               const p = parts[i];
-              if (p.kind === "tool" && p.status === "running") {
-                parts[i] = { ...p, status: ev.ok ? "done" : "error" };
+              if (p.kind === "tool" && p.running > 0) {
+                parts[i] = ev.ok
+                  ? { ...p, running: p.running - 1, done: p.done + 1 }
+                  : { ...p, running: p.running - 1, errors: p.errors + 1 };
                 break;
               }
             }
