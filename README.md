@@ -1,6 +1,8 @@
 # Spark — Vulcan OmniPro 220 Multimodal Assistant
 
-A multimodal expert agent for the [Vulcan OmniPro 220](https://www.harborfreight.com/omnipro-220-industrial-multiprocess-welder-with-120240v-input-57812.html) multiprocess welder, built on the [Anthropic Claude Agent SDK](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk). Submitted for the Prox founding-engineer challenge — the original brief is preserved in [`CHALLENGE.md`](./CHALLENGE.md).
+**Live demo:** <https://prox-challenge-sooty.vercel.app>
+
+A multimodal expert agent for the [Vulcan OmniPro 220](https://www.harborfreight.com/omnipro-220-industrial-multiprocess-welder-with-120240v-input-57812.html) multiprocess welder. Submitted for the Prox founding-engineer challenge — the original brief is preserved in [`CHALLENGE.md`](./CHALLENGE.md).
 
 The agent — **Spark** — answers technical questions by **searching the manual, citing pages, showing the actual diagram/schematic/photo, and generating interactive artifacts** (duty-cycle calculators, polarity pickers, troubleshooting flows) when a tool is more useful than a wall of text.
 
@@ -166,7 +168,8 @@ The committed `knowledge/` folder is bundled with the API routes via `outputFile
 
 ## Submission notes for the Prox team
 
-- **Live demo**: _link goes here once deployed_
+- **Live demo**: <https://prox-challenge-sooty.vercel.app>
+- **Repo**: <https://github.com/Keugene11/prox-challenge>
 - **Video walkthrough**: _link goes here_
 - **Time to first answer from `git clone`**: ~90 seconds on a warm pnpm cache.
 
