@@ -24,7 +24,12 @@
     "zod": "^4.0.0"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["sharp", "esbuild"]
+    "onlyBuiltDependencies": ["sharp", "esbuild"],
+    "supportedArchitectures": {
+      "os": ["current", "linux"],
+      "cpu": ["current", "x64", "arm64"],
+      "libc": ["current", "glibc"]
+    }
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

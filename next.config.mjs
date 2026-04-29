@@ -3,10 +3,17 @@ const nextConfig = {
   experimental: {
     serverActions: { bodySizeLimit: "10mb" },
   },
-  // Bundle the committed knowledge index + page renders with the API routes
-  // so they're available on Vercel serverless.
+  // The Claude Agent SDK ships a native CLI binary as platform-specific optional
+  // packages; mark the SDK external so Next doesn't bundle it (which would
+  // strip the optional sibling packages), and explicitly include the linux-x64
+  // binary in the function's traced files. Also bundle the knowledge index.
+  serverExternalPackages: ["@anthropic-ai/claude-agent-sdk"],
   outputFileTracingIncludes: {
-    "/api/chat": ["./knowledge/**/*"],
+    "/api/chat": [
+      "./knowledge/**/*",
+      "./node_modules/.pnpm/@anthropic-ai+claude-agent-sdk*/**/*",
+      "./node_modules/@anthropic-ai/claude-agent-sdk*/**/*",
+    ],
     "/api/page-image": ["./knowledge/**/*"],
   },
   webpack: (config) => {
