@@ -10,7 +10,9 @@ export async function GET(req: NextRequest) {
   const doc = searchParams.get("doc") || "";
   const page = Number(searchParams.get("page") || "0");
   const variant = searchParams.get("variant") === "thumb" ? "thumb" : "full";
-  if (!doc || !page) return new Response("missing params", { status: 400 });
+  if (!doc || !Number.isFinite(page) || page < 1) {
+    return new Response("missing or invalid params", { status: 400 });
+  }
   try {
     const idx = await loadKnowledge();
     const p = getPage(idx, doc, page);
@@ -22,9 +24,12 @@ export async function GET(req: NextRequest) {
       headers: {
         "content-type": ct,
         "cache-control": "public, max-age=31536000, immutable",
+        "x-content-type-options": "nosniff",
       },
     });
   } catch (err) {
-    return new Response("error: " + (err as Error).message, { status: 500 });
+    // Log server-side, return generic 500 to client (no path/error leakage).
+    console.error("[page-image] read failed:", err);
+    return new Response("server error", { status: 500 });
   }
 }
