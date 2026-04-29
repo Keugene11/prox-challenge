@@ -22,11 +22,39 @@ export function Chat() {
   const scrollerRef = useRef<HTMLDivElement>(null);
   const [viewer, setViewer] = useState<{ doc: string; page: number } | null>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
+  // Stick to the bottom only while the user hasn't scrolled away. Re-engages
+  // the moment they scroll back near the bottom, so streaming resumes smoothly.
+  const stickRef = useRef(true);
+  const [showJump, setShowJump] = useState(false);
 
   useEffect(() => {
     const el = scrollerRef.current;
-    if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    if (!el) return;
+    const onScroll = () => {
+      const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+      const atBottom = distance < 64;
+      stickRef.current = atBottom;
+      setShowJump(!atBottom && (streaming || messages.length > 0));
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, [streaming, messages.length]);
+
+  useEffect(() => {
+    const el = scrollerRef.current;
+    if (!el) return;
+    if (!stickRef.current) return;
+    // Use "auto" while streaming for snappy follow; "smooth" otherwise.
+    el.scrollTo({ top: el.scrollHeight, behavior: streaming ? "auto" : "smooth" });
   }, [messages, streaming]);
+
+  function jumpToBottom() {
+    const el = scrollerRef.current;
+    if (!el) return;
+    stickRef.current = true;
+    setShowJump(false);
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+  }
 
   useEffect(() => {
     autosizeTextarea(taRef.current);
@@ -42,6 +70,9 @@ export function Chat() {
       { role: "user", parts: [{ kind: "text", text }], pageRefs: [] },
       { role: "assistant", parts: [], pageRefs: [] },
     ];
+    // Sending a new message always re-engages auto-scroll.
+    stickRef.current = true;
+    setShowJump(false);
     setMessages(nextHistory);
     setStreaming(true);
 
@@ -174,7 +205,7 @@ export function Chat() {
   return (
     <div className="flex flex-col h-[100dvh] max-h-[100dvh]">
       <Header />
-      <div ref={scrollerRef} className="flex-1 overflow-y-auto scroll-fade">
+      <div ref={scrollerRef} className="flex-1 overflow-y-auto scroll-fade relative">
         <div className="max-w-3xl mx-auto px-4 sm:px-6 py-6 flex flex-col gap-6">
           {messages.length === 0 ? (
             <Welcome onPick={(s) => send(s)} />
@@ -189,6 +220,21 @@ export function Chat() {
           )}
         </div>
       </div>
+      {showJump ? (
+        <button
+          type="button"
+          onClick={jumpToBottom}
+          className="press absolute left-1/2 -translate-x-1/2 z-20 rounded-full bg-ink text-paper-card text-xs font-medium px-3 py-1.5 shadow-card-lg flex items-center gap-1.5"
+          style={{ bottom: 88 }}
+          title="Jump to latest"
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 5v14" />
+            <path d="m19 12-7 7-7-7" />
+          </svg>
+          {streaming ? "Jump to live" : "Jump to latest"}
+        </button>
+      ) : null}
       <Composer
         ref={taRef}
         value={input}
