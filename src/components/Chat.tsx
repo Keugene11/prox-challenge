@@ -212,9 +212,20 @@ export function Chat() {
     abortRef.current?.abort();
   }
 
+  function newChat() {
+    abortRef.current?.abort();
+    setMessages([]);
+    setInput("");
+    setStreaming(false);
+    setShowJump(false);
+    stickRef.current = true;
+    setViewer(null);
+    taRef.current?.focus();
+  }
+
   return (
     <div className="flex flex-col h-[100dvh] max-h-[100dvh]">
-      <Header />
+      <Header onHome={newChat} hasMessages={messages.length > 0} />
       <div ref={scrollerRef} className="flex-1 overflow-y-auto scroll-fade relative">
         <div className="max-w-3xl mx-auto px-4 sm:px-6 py-6 flex flex-col gap-6">
           {messages.length === 0 ? (
@@ -260,21 +271,27 @@ export function Chat() {
   );
 }
 
-function Header() {
+function Header({ onHome, hasMessages }: { onHome: () => void; hasMessages: boolean }) {
   return (
     <header className="border-b border-ink-line bg-paper-card/80 backdrop-blur sticky top-0 z-10">
       <div className="max-w-3xl mx-auto px-4 sm:px-6 py-3 flex items-center justify-between">
-        <div className="flex items-center gap-2.5">
+        <button
+          type="button"
+          onClick={onHome}
+          disabled={!hasMessages}
+          className="press flex items-center gap-2.5 -mx-1 px-1 py-1 rounded-lg hover:bg-ink/[0.03] disabled:hover:bg-transparent disabled:cursor-default"
+          title={hasMessages ? "Start a new chat" : "Spark"}
+        >
           <div className="h-7 w-7 rounded-full bg-ink text-paper-card flex items-center justify-center text-[11px] font-semibold">
             S
           </div>
-          <div>
+          <div className="text-left">
             <div className="text-sm font-semibold leading-none">Spark</div>
             <div className="text-[11px] text-ink-muted leading-none mt-0.5">
               Vulcan OmniPro 220 expert
             </div>
           </div>
-        </div>
+        </button>
         <a
           href="https://www.harborfreight.com/omnipro-220-industrial-multiprocess-welder-with-120240v-input-57812.html"
           target="_blank"
