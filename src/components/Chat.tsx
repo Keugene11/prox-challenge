@@ -1,10 +1,19 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowUp, Square } from "lucide-react";
 import { Message, type ChatMessage, type MessagePart } from "./Message";
 import { PageViewer } from "./PageViewer";
+import { Sidebar, SidebarToggle } from "./Sidebar";
 import { streamChat } from "@/lib/stream-client";
+import {
+  loadConversations,
+  saveConversation,
+  deleteConversation,
+  newConversationId,
+  makeTitle,
+  type StoredConversation,
+} from "@/lib/storage";
 
 const SUGGESTIONS = [
   "What's the duty cycle for MIG at 200A on 240V?",
@@ -22,6 +31,62 @@ export function Chat() {
   const scrollerRef = useRef<HTMLDivElement>(null);
   const [viewer, setViewer] = useState<{ doc: string; page: number } | null>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
+  // Conversation persistence (localStorage). activeId === null means "draft" —
+  // no row exists yet; we create one as soon as the first user message lands.
+  const [conversations, setConversations] = useState<StoredConversation[]>([]);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  // Used to suppress the auto-save effect during a switch-conversation load.
+  const skipSaveRef = useRef(false);
+
+  // Hydrate from localStorage on mount; surface most recent as active if any.
+  useEffect(() => {
+    const list = loadConversations();
+    setConversations(list);
+    if (list.length > 0) {
+      const top = list[0];
+      skipSaveRef.current = true;
+      setActiveId(top.id);
+      setMessages(top.messages);
+    }
+  }, []);
+
+  // Auto-save the active conversation whenever messages change. Skipped while
+  // streaming partial assistant content (we'd save 100 times mid-stream); we
+  // save once at stream end via the effect on `streaming`.
+  const persistRef = useRef<{ id: string; createdAt: number } | null>(null);
+  const saveNow = useCallback((msgs: ChatMessage[]) => {
+    if (skipSaveRef.current) {
+      skipSaveRef.current = false;
+      return;
+    }
+    if (msgs.length === 0) return;
+    let id = activeId;
+    let createdAt = persistRef.current?.createdAt ?? Date.now();
+    if (!id) {
+      id = newConversationId();
+      setActiveId(id);
+      persistRef.current = { id, createdAt };
+    }
+    const firstUser = msgs.find((m) => m.role === "user");
+    const titleSource = firstUser?.parts.find((p) => p.kind === "text") as { kind: "text"; text: string } | undefined;
+    const title = titleSource ? makeTitle(titleSource.text) : "New chat";
+    const conv: StoredConversation = {
+      id,
+      title,
+      createdAt,
+      updatedAt: Date.now(),
+      messages: msgs,
+    };
+    saveConversation(conv);
+    setConversations(loadConversations());
+  }, [activeId]);
+
+  useEffect(() => {
+    if (streaming) return; // batch the save to stream end
+    if (messages.length === 0) return;
+    saveNow(messages);
+  }, [streaming, messages, saveNow]);
   // Stick to the bottom only while the user hasn't scrolled away. Re-engages
   // the moment they scroll back near the bottom, so streaming resumes smoothly.
   const stickRef = useRef(true);
@@ -220,12 +285,58 @@ export function Chat() {
     setShowJump(false);
     stickRef.current = true;
     setViewer(null);
+    setActiveId(null);
+    persistRef.current = null;
     taRef.current?.focus();
+  }
+
+  function selectConversation(id: string) {
+    if (id === activeId) {
+      setSidebarOpen(false);
+      return;
+    }
+    abortRef.current?.abort();
+    const conv = conversations.find((c) => c.id === id);
+    if (!conv) return;
+    skipSaveRef.current = true;
+    setActiveId(id);
+    persistRef.current = { id: conv.id, createdAt: conv.createdAt };
+    setMessages(conv.messages);
+    setStreaming(false);
+    setInput("");
+    setShowJump(false);
+    stickRef.current = true;
+    setSidebarOpen(false);
+  }
+
+  function handleDelete(id: string) {
+    deleteConversation(id);
+    const list = loadConversations();
+    setConversations(list);
+    if (id === activeId) {
+      newChat();
+    }
   }
 
   return (
     <div className="flex flex-col h-[100dvh] max-h-[100dvh]">
-      <Header onHome={newChat} hasMessages={messages.length > 0} />
+      <Sidebar
+        open={sidebarOpen}
+        onClose={() => setSidebarOpen(false)}
+        activeId={activeId}
+        conversations={conversations}
+        onSelect={selectConversation}
+        onNew={() => {
+          newChat();
+          setSidebarOpen(false);
+        }}
+        onDelete={handleDelete}
+      />
+      <Header
+        onHome={newChat}
+        hasMessages={messages.length > 0}
+        onOpenSidebar={() => setSidebarOpen(true)}
+      />
       <div ref={scrollerRef} className="flex-1 overflow-y-auto scroll-fade relative">
         <div className="max-w-3xl mx-auto px-4 sm:px-6 py-6 flex flex-col gap-6">
           {messages.length === 0 ? (
@@ -271,27 +382,38 @@ export function Chat() {
   );
 }
 
-function Header({ onHome, hasMessages }: { onHome: () => void; hasMessages: boolean }) {
+function Header({
+  onHome,
+  hasMessages,
+  onOpenSidebar,
+}: {
+  onHome: () => void;
+  hasMessages: boolean;
+  onOpenSidebar: () => void;
+}) {
   return (
     <header className="border-b border-ink-line bg-paper-card/80 backdrop-blur sticky top-0 z-10">
       <div className="max-w-3xl mx-auto px-4 sm:px-6 py-3 flex items-center justify-between">
-        <button
-          type="button"
-          onClick={onHome}
-          disabled={!hasMessages}
-          className="press flex items-center gap-2.5 -mx-1 px-1 py-1 rounded-lg hover:bg-ink/[0.03] disabled:hover:bg-transparent disabled:cursor-default"
-          title={hasMessages ? "Start a new chat" : "Spark"}
-        >
-          <div className="h-7 w-7 rounded-full bg-ink text-paper-card flex items-center justify-center text-[11px] font-semibold">
-            S
-          </div>
-          <div className="text-left">
-            <div className="text-sm font-semibold leading-none">Spark</div>
-            <div className="text-[11px] text-ink-muted leading-none mt-0.5">
-              Vulcan OmniPro 220 expert
+        <div className="flex items-center gap-1">
+          <SidebarToggle onClick={onOpenSidebar} />
+          <button
+            type="button"
+            onClick={onHome}
+            disabled={!hasMessages}
+            className="press flex items-center gap-2.5 px-1 py-1 rounded-lg hover:bg-ink/[0.03] disabled:hover:bg-transparent disabled:cursor-default"
+            title={hasMessages ? "Start a new chat" : "Spark"}
+          >
+            <div className="h-7 w-7 rounded-full bg-ink text-paper-card flex items-center justify-center text-[11px] font-semibold">
+              S
             </div>
-          </div>
-        </button>
+            <div className="text-left">
+              <div className="text-sm font-semibold leading-none">Spark</div>
+              <div className="text-[11px] text-ink-muted leading-none mt-0.5">
+                Vulcan OmniPro 220 expert
+              </div>
+            </div>
+          </button>
+        </div>
         <a
           href="https://www.harborfreight.com/omnipro-220-industrial-multiprocess-welder-with-120240v-input-57812.html"
           target="_blank"
