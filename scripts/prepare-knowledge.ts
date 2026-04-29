@@ -96,12 +96,15 @@ async function renderPdf(docId: string, pdfPath: string) {
     } as unknown as Parameters<typeof page.render>[0]).promise;
 
     const png = canvas.toBuffer("image/png");
-    const pngName = `${docId}-${String(p).padStart(3, "0")}.png`;
+    const jpgName = `${docId}-${String(p).padStart(3, "0")}.jpg`;
     const thumbName = `${docId}-${String(p).padStart(3, "0")}-thumb.jpg`;
-    const pngPath = path.join(PAGES_DIR, pngName);
+    const jpgPath = path.join(PAGES_DIR, jpgName);
     const thumbPath = path.join(PAGES_DIR, thumbName);
 
-    await fs.writeFile(pngPath, png);
+    // Write the full-resolution page as JPEG (mozjpeg q=88) — visually
+    // identical to the PNG for printed/scanned pages, ~3x smaller, fits
+    // serverless function limits.
+    await sharp(png).jpeg({ quality: 88, mozjpeg: true }).toFile(jpgPath);
     await sharp(png).resize({ width: THUMB_WIDTH, withoutEnlargement: true }).jpeg({ quality: 78 }).toFile(thumbPath);
 
     const textContent = await page.getTextContent();
@@ -112,12 +115,12 @@ async function renderPdf(docId: string, pdfPath: string) {
       .replace(/\n{3,}/g, "\n\n")
       .trim();
 
-    process.stdout.write(`    rendered ${pngName}\r`);
+    process.stdout.write(`    rendered ${jpgName}\r`);
 
     pages.push({
       page: p,
       text,
-      pngPath: path.relative(ROOT, pngPath).replace(/\\/g, "/"),
+      pngPath: path.relative(ROOT, jpgPath).replace(/\\/g, "/"),
       thumbPath: path.relative(ROOT, thumbPath).replace(/\\/g, "/"),
     });
   }
@@ -239,9 +242,9 @@ async function main() {
       } else if (skipVision) {
         analysis = { section: null, caption: p.text.slice(0, 140), topics: [], figures: [] };
       } else {
-        const pngBuf = await fs.readFile(path.join(ROOT, p.pngPath));
+        const buf = await fs.readFile(path.join(ROOT, p.pngPath));
         // Use the thumbnail-sized version for vision to save tokens — still legible.
-        const small = await sharp(pngBuf).resize({ width: 1200, withoutEnlargement: true }).png().toBuffer();
+        const small = await sharp(buf).resize({ width: 1200, withoutEnlargement: true }).png().toBuffer();
         process.stdout.write(`    analyzing ${doc.id} p${p.page}...\r`);
         try {
           analysis = await analyzePage(client, small, p.text, doc.id, p.page);

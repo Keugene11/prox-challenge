@@ -11,10 +11,24 @@ const nextConfig = {
   outputFileTracingIncludes: {
     "/api/chat": [
       "./knowledge/**/*",
-      "./node_modules/.pnpm/@anthropic-ai+claude-agent-sdk*/**/*",
-      "./node_modules/@anthropic-ai/claude-agent-sdk*/**/*",
+      "./node_modules/.pnpm/@anthropic-ai+claude-agent-sdk@*/**/*",
+      "./node_modules/.pnpm/@anthropic-ai+claude-agent-sdk-linux-x64@*/**/*",
+      "./node_modules/@anthropic-ai/claude-agent-sdk/**/*",
+      "./node_modules/@anthropic-ai/claude-agent-sdk-linux-x64/**/*",
     ],
     "/api/page-image": ["./knowledge/**/*"],
+  },
+  outputFileTracingExcludes: {
+    "/api/chat": [
+      "./node_modules/.pnpm/@anthropic-ai+claude-agent-sdk-darwin*/**",
+      "./node_modules/.pnpm/@anthropic-ai+claude-agent-sdk-win32*/**",
+      "./node_modules/.pnpm/@anthropic-ai+claude-agent-sdk-linux-arm64*/**",
+      "./node_modules/.pnpm/@anthropic-ai+claude-agent-sdk-linux-x64-musl*/**",
+      "./node_modules/@anthropic-ai/claude-agent-sdk-darwin*/**",
+      "./node_modules/@anthropic-ai/claude-agent-sdk-win32*/**",
+      "./node_modules/@anthropic-ai/claude-agent-sdk-linux-arm64*/**",
+      "./node_modules/@anthropic-ai/claude-agent-sdk-linux-x64-musl*/**",
+    ],
   },
   webpack: (config) => {
     config.resolve.alias.canvas = false;

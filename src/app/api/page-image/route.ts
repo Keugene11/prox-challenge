@@ -17,7 +17,7 @@ export async function GET(req: NextRequest) {
     if (!p) return new Response("not found", { status: 404 });
     const rel = variant === "thumb" ? p.thumb : p.image;
     const buf = await fs.readFile(path.join(process.cwd(), rel));
-    const ct = rel.endsWith(".png") ? "image/png" : "image/jpeg";
+    const ct = rel.toLowerCase().endsWith(".png") ? "image/png" : "image/jpeg";
     return new Response(buf, {
       headers: {
         "content-type": ct,

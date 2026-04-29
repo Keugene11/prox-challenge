@@ -29,9 +29,10 @@ export type ChatTurn = {
  */
 const SERVER_NAME = "manual";
 
-async function readPageImageBase64(pageImagePath: string): Promise<string> {
+async function readPageImage(pageImagePath: string): Promise<{ data: string; mimeType: string }> {
   const buf = await fs.readFile(path.join(process.cwd(), pageImagePath));
-  return buf.toString("base64");
+  const mimeType = pageImagePath.toLowerCase().endsWith(".png") ? "image/png" : "image/jpeg";
+  return { data: buf.toString("base64"), mimeType };
 }
 
 async function buildMcpServer() {
@@ -86,14 +87,10 @@ async function buildMcpServer() {
       if (!page) {
         return { content: [{ type: "text", text: `No page ${args.page} in ${args.doc}.` }] };
       }
-      const data = await readPageImageBase64(page.image);
+      const { data, mimeType } = await readPageImage(page.image);
       return {
         content: [
-          {
-            type: "image",
-            data,
-            mimeType: "image/png",
-          },
+          { type: "image", data, mimeType },
           {
             type: "text",
             text: `Shown: ${args.doc} p${args.page} — ${page.section ? `${page.section}. ` : ""}${page.caption}`,
@@ -114,10 +111,10 @@ async function buildMcpServer() {
       if (!found) {
         return { content: [{ type: "text", text: `No figure with id ${args.id}. Use search_manual or list_figures to discover ids.` }] };
       }
-      const data = await readPageImageBase64(found.page.image);
+      const { data, mimeType } = await readPageImage(found.page.image);
       return {
         content: [
-          { type: "image", data, mimeType: "image/png" },
+          { type: "image", data, mimeType },
           {
             type: "text",
             text: `${found.figure.label} (${found.figure.kind}) — ${found.figure.summary}\nFrom ${found.page.doc} p${found.page.page}.`,
