@@ -61,18 +61,22 @@ knowledge/
 src/
   app/
     page.tsx                    Chat UI entry
-    api/chat/route.ts           SSE streaming agent endpoint
+    layout.tsx                  Root layout
+    api/chat/route.ts           SSE streaming agent endpoint (rate-limited, size-capped)
     api/page-image/route.ts     Serves page PNG / thumbnail by (doc, page)
   lib/
-    agent.ts                    Claude Agent SDK glue: tools, system prompt, event projection
+    agent.ts                    Messages-API glue: tools, system prompt, event projection
     knowledge.ts                Index loader + lightweight ranked search
     stream-client.ts            Client-side SSE consumer
+    storage.ts                  localStorage conversation persistence + Markdown/JSON export
+    rate-limit.ts               In-memory token-bucket limiter, keyed by client IP
   components/
     Chat.tsx                    Conversation state, composer, autosize, abort
+    Sidebar.tsx                 Conversation list, new-chat button, per-chat export/delete
     Message.tsx                 Renders text / images / artifacts / sources
     Artifact.tsx                Sandboxed iframe renderer for agent-generated mini-apps
     PageThumb.tsx               Source-page thumbnail (clickable)
-    PageViewer.tsx              Modal full-page viewer with zoom
+    PageViewer.tsx              Modal full-page viewer: zoom + drag-to-pan
 ```
 
 ### Knowledge extraction
@@ -126,8 +130,27 @@ Tone: garage-coach. Direct, calm, no fluff, no AI-as-an-AI hedging. The user is 
 
 - The chat endpoint streams Server-Sent Events. Backpressure is handled by Next.js's `ReadableStream`.
 - The composer uses Enter-to-send / Shift+Enter for newline, and supports stop-mid-stream via `AbortController`.
-- Source pages are deduped per `(doc, page)` and shown as clickable thumbnails under each assistant message; clicking opens a zoomable full-page viewer.
+- Source pages are deduped per `(doc, page)` and shown as clickable thumbnails under each assistant message; clicking opens a full-page viewer with zoom and drag-to-pan.
+- Consecutive same-tool calls (e.g. four `search_manual` calls in a row) collapse into a single counted row in the tool-activity strip, so a verbose retrieval pass doesn't drown the message.
+- Auto-scroll only follows the bottom while the user is already pinned there — once they scroll up to read, streaming output stops yanking the viewport.
+- Clicking the Spark logo starts a new chat. Enter-to-send, Shift+Enter for newline, Esc to cancel a stream.
 - Artifact iframes use `sandbox="allow-scripts"` (no `allow-same-origin`) so model-generated JS can't read cookies, hit our origin's storage, or fetch authenticated APIs. They auto-resize via a `postMessage` shim injected by the wrapper.
+
+### Conversations
+
+Conversations persist to `localStorage` so a refresh doesn't lose state, and a sidebar lists every saved chat with a per-chat export menu (Markdown or JSON) and a two-click delete.
+
+The non-obvious bit: tool-returned page images come back as 50–800KB base64 data URIs, which would blow the ~5MB localStorage quota after a handful of chats. On serialize, each image part with a known `(doc, page)` source is rewritten to a `/api/page-image?doc=…&page=…` URL — provenance is preserved, the bytes aren't. Untraceable images are dropped rather than risk the bucket. The store is capped to the 50 most recent conversations and self-trims on `QuotaExceededError`.
+
+### Security and abuse limits
+
+The deployed agent is single-key and the API key sits server-side, so the main exposure is bill-burn from someone hammering `/api/chat`. Mitigations:
+
+- **Rate limit**: in-memory token bucket per client IP (8 burst, 12/min sustained), checked before parsing or hitting the model. 429s carry a `Retry-After` header. Good enough for one Vercel region; swap for `@upstash/ratelimit` + KV if multi-region.
+- **Request size caps**: 30 turns max, 8K chars per message, 60K chars total — enforced before the model call so an attacker can't pump up our input-token bill.
+- **Sanitized errors**: the model and runtime errors are logged server-side but the client only ever sees a generic "the agent ran into a problem" string, so stack traces and internal paths don't leak.
+- **Security headers**: `x-content-type-options`, `x-frame-options: SAMEORIGIN`, `referrer-policy: strict-origin-when-cross-origin`, and `permissions-policy` denying camera/mic/geolocation, set globally in `next.config.mjs`.
+- **Sandboxed artifacts**: covered above — `allow-scripts` only, no same-origin, so generated JS can't reach our cookies or APIs.
 
 ### Why this stack
 
@@ -140,7 +163,7 @@ Tone: garage-coach. Direct, calm, no fluff, no AI-as-an-AI hedging. The user is 
 
 - Vector embeddings / a real vector DB. The index is small enough (~50 pages) that lexical scoring on captions + topics + figure labels gives strong-enough recall, and it ships with zero infra.
 - Voice. The brief mentioned it as a stretch goal; the multimodal artifact channel was the higher-value bet.
-- Multi-tenancy, auth, persistence. Single-key local app per the brief.
+- Multi-tenancy, auth, server-side persistence. Single-key local app per the brief — chats are saved client-side in `localStorage`, not on a server.
 
 ---
 
