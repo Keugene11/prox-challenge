@@ -193,7 +193,7 @@ The committed `knowledge/` folder is bundled with the API routes via `outputFile
 
 - **Live demo**: <https://prox-challenge-sooty.vercel.app>
 - **Repo**: <https://github.com/Keugene11/prox-challenge>
-- **Video walkthrough**: _link goes here_
+- **Video walkthrough**: <https://youtu.be/IIqGroRbVhA>
 - **Time to first answer from `git clone`**: ~90 seconds on a warm pnpm cache.
 
 If anything fails on your machine, the most likely cause is a missing API key or a stale `node_modules`. Try `rm -rf node_modules && pnpm install`.
