@@ -9,7 +9,7 @@ const nextConfig = {
         source: "/:path*",
         headers: [
           { key: "x-content-type-options", value: "nosniff" },
-          { key: "x-frame-options", value: "SAMEORIGIN" },
+          { key: "content-security-policy", value: "frame-ancestors 'self' https://keugenelee.com https://*.vercel.app" },
           { key: "referrer-policy", value: "strict-origin-when-cross-origin" },
           { key: "permissions-policy", value: "camera=(), microphone=(), geolocation=()" },
         ],
